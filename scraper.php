@@ -2,7 +2,7 @@
 
 date_default_timezone_set('America/Sao_Paulo');
 
-// CONFIGURAÇÃO
+// CONFIG
 $API_KEY = "56d51dcab377a0365e0728c36c342e7f";
 $VIDEO_ID = "7b9TyVtVeJo";
 $JSON_FILE = "dados.json";
@@ -13,96 +13,91 @@ $url = "https://api.scraperapi.com/?api_key={$API_KEY}&url=" . urlencode($target
 $html = @file_get_contents($url);
 
 if (!$html) {
-    die("❌ Erro ao acessar o YouTube via ScraperAPI");
+    die("❌ Erro ao acessar via ScraperAPI");
 }
 
-// ================================
-// EXTRAI AS VIEWS (confiável)
-// ================================
-preg_match('/"viewCount":"(\d+)"/', $html, $mv);
-$views = isset($mv[1]) ? intval($mv[1]) : 0;
+// ----------------------------------------------
+// FUNÇÃO: tenta vários padrões até encontrar
+// ----------------------------------------------
 
-// ================================
-// EXTRAÇÃO ROBUSTA DE LIKES
-// ================================
-
-// Tentativa 1 – Formato comum
-if (!isset($likes)) {
-    preg_match('/"label":"([\d,.]+) Likes"/', $html, $ml);
-    if (isset($ml[1])) {
-        $likes = intval(str_replace([",","."], "", $ml[1]));
+function extract_match($html, $patterns) {
+    foreach ($patterns as $pattern) {
+        if (preg_match($pattern, $html, $m)) {
+            return $m[1];
+        }
     }
+    return null;
 }
 
-// Tentativa 2 – Novo formato de 2024/2025
-if (!isset($likes)) {
-    preg_match('/"defaultText":"([\d,.]+)"/', $html, $ml2);
-    if (isset($ml2[1])) {
-        $likes = intval(str_replace([",","."], "", $ml2[1]));
-    }
-}
+// ----------------------------------------------
+// VIEWS (funciona bem sempre)
+// ----------------------------------------------
+$views = extract_match($html, [
+    '/"viewCount":"(\d+)"/',
+    '/"shortViewCount":"(\d+)"/',
+    '/"viewCount":{"simpleText":"([\d,.]+)"/'
+]);
 
-// Tentativa 3 – Outro padrão possível
-if (!isset($likes)) {
-    preg_match('/"likeCount":"(\d+)"/', $html, $ml3);
-    if (isset($ml3[1])) {
-        $likes = intval($ml3[1]);
-    }
-}
+$views = $views ? intval(str_replace([",","."], "", $views)) : 0;
 
-// Se nada encontrado
-if (!isset($likes)) {
-    $likes = 0;
-}
+// ----------------------------------------------
+// LIKES (vários padrões)
+// ----------------------------------------------
+$likes = extract_match($html, [
+    '/"label":"([\d,.]+) Likes"/',
+    '/"likeCount":"(\d+)"/',
+    '/"defaultText":"([\d,.]+)"/',
+    '/"toggleButtonRenderer":{.*?"accessibilityData":{.*?"label":"([\d,.]+) likes"/s'
+]);
 
-// ================================
-// EXTRAÇÃO DE COMENTÁRIOS
-// ================================
+$likes = $likes ? intval(str_replace([",","."], "", $likes)) : 0;
 
-// Tentativa 1
-preg_match('/"commentCount":"(\d+)"/', $html, $mcom);
-$comments = isset($mcom[1]) ? intval($mcom[1]) : null;
+// ----------------------------------------------
+// COMENTÁRIOS — AQUI ESTÁ A MÁGICA
+// ----------------------------------------------
+$comments = extract_match($html, [
+    '/"commentCount":"(\d+)"/',
+    '/"simpleText":"([\d,.]+) comments"/i',
+    '/"commentsCount":{"simpleText":"([\d,.]+)"/',
+    '/"accessibilityData":{.*?"label":"([\d,.]+) Comments"/si',
+    '/"Comments":\{"simpleText":"([\d,.]+)"/',
+    '/"commentCountText":\{"simpleText":"([\d,.]+)"/',
+    '/"countText":\{"simpleText":"([\d,.]+)"/'
+]);
 
-// Tentativa 2 – outro formato
-if ($comments === null) {
-    preg_match('/"commentsCount":{"simpleText":"([\d,.]+)"/', $html, $mcom2);
-    if (isset($mcom2[1])) {
-        $comments = intval(str_replace([",","."], "", $mcom2[1]));
-    }
-}
+$comments = $comments ? intval(str_replace([",","."], "", $comments)) : 0;
 
-// Tentativa 3 – fallback
-if ($comments === null) {
-    $comments = 0;
-}
+// ----------------------------------------------
+// TÍTULO
+// ----------------------------------------------
+$title = extract_match($html, [
+    '/"title":"(.*?)"/',
+    '/"title":\{"simpleText":"(.*?)"/'
+]);
 
-// ================================
-// TÍTULO E CANAL
-// ================================
+// ----------------------------------------------
+// CANAL
+// ----------------------------------------------
+$channel = extract_match($html, [
+    '/"ownerChannelName":"(.*?)"/',
+    '/"channel":"(.*?)"/'
+]);
 
-preg_match('/"title":"(.*?)"/', $html, $mt);
-$title = isset($mt[1]) ? $mt[1] : "";
-
-preg_match('/"ownerChannelName":"(.*?)"/', $html, $mc);
-$channel = isset($mc[1]) ? $mc[1] : "";
-
-// ================================
-// MONTA REGISTRO
-// ================================
-
+// ----------------------------------------------
+// REGISTRO FINAL
+// ----------------------------------------------
 $new = [
     "data"      => date("Y-m-d H:i:s"),
     "views"     => $views,
     "likes"     => $likes,
     "comments"  => $comments,
-    "title"     => $title,
-    "channel"   => $channel
+    "title"     => $title ?: "Sem título",
+    "channel"   => $channel ?: "Desconhecido"
 ];
 
-// ================================
-// ADICIONA AO JSON
-// ================================
-
+// ----------------------------------------------
+// GRAVA NO JSON
+// ----------------------------------------------
 if (!file_exists($JSON_FILE)) {
     file_put_contents($JSON_FILE, "[]");
 }
