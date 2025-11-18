@@ -16,88 +16,144 @@ if (!$html) {
     die("❌ Erro ao acessar via ScraperAPI");
 }
 
-// ----------------------------------------------
-// FUNÇÃO: tenta vários padrões até encontrar
-// ----------------------------------------------
+// =====================================================
+// 1. EXTRAIR TODOS OS JSONS INTERNOS DO YOUTUBE
+// =====================================================
 
-function extract_match($html, $patterns) {
-    foreach ($patterns as $pattern) {
-        if (preg_match($pattern, $html, $m)) {
-            return $m[1];
-        }
-    }
-    return null;
+// Pega o JSON mais importante: ytInitialData
+preg_match('/ytInitialData"\]\s*=\s*(\{.*?\});/', $html, $init1);
+
+// Pega o JSON do player: ytInitialPlayerResponse
+preg_match('/ytInitialPlayerResponse"\]\s*=\s*(\{.*?\});/', $html, $init2);
+
+// Fallback adicional
+preg_match('/var ytInitialData = (\{.*?\});/', $html, $init3);
+
+$json_raw = $init1[1] ?? $init2[1] ?? $init3[1] ?? null;
+$yt = $json_raw ? json_decode($json_raw, true) : null;
+
+
+// =====================================================
+// 2. EXTRAIR DADOS DO ytInitialPlayerResponse SE EXISTIR
+// =====================================================
+
+preg_match('/ytInitialPlayerResponse"\]\s*=\s*(\{.*?\});/', $html, $playerMatch);
+$playerJSON = isset($playerMatch[1]) ? json_decode($playerMatch[1], true) : null;
+
+
+// =====================================================
+// VIEWS
+// =====================================================
+
+$views = 0;
+
+if ($playerJSON && isset($playerJSON["videoDetails"]["viewCount"])) {
+    $views = intval($playerJSON["videoDetails"]["viewCount"]);
+} else {
+    // fallback HTML
+    preg_match('/"viewCount":"(\d+)"/', $html, $m);
+    if (isset($m[1])) $views = intval($m[1]);
 }
 
-// ----------------------------------------------
-// VIEWS (funciona bem sempre)
-// ----------------------------------------------
-$views = extract_match($html, [
-    '/"viewCount":"(\d+)"/',
-    '/"shortViewCount":"(\d+)"/',
-    '/"viewCount":{"simpleText":"([\d,.]+)"/'
-]);
 
-$views = $views ? intval(str_replace([",","."], "", $views)) : 0;
+// =====================================================
+// LIKES
+// =====================================================
 
-// ----------------------------------------------
-// LIKES (vários padrões)
-// ----------------------------------------------
-$likes = extract_match($html, [
-    '/"label":"([\d,.]+) Likes"/',
-    '/"likeCount":"(\d+)"/',
-    '/"defaultText":"([\d,.]+)"/',
-    '/"toggleButtonRenderer":{.*?"accessibilityData":{.*?"label":"([\d,.]+) likes"/s'
-]);
+$likes = 0;
 
-$likes = $likes ? intval(str_replace([",","."], "", $likes)) : 0;
+if ($playerJSON && isset($playerJSON["videoDetails"]["likes"])) {
+    $likes = intval($playerJSON["videoDetails"]["likes"]);
+} else {
+    // fallback
+    preg_match('/"label":"([\d,.]+) Likes"/', $html, $ml);
+    if (isset($ml[1])) $likes = intval(str_replace([",","."], "", $ml[1]));
+}
 
-// ----------------------------------------------
-// COMENTÁRIOS — AQUI ESTÁ A MÁGICA
-// ----------------------------------------------
-$comments = extract_match($html, [
-    '/"commentCount":"(\d+)"/',
-    '/"simpleText":"([\d,.]+) comments"/i',
-    '/"commentsCount":{"simpleText":"([\d,.]+)"/',
-    '/"accessibilityData":{.*?"label":"([\d,.]+) Comments"/si',
-    '/"Comments":\{"simpleText":"([\d,.]+)"/',
-    '/"commentCountText":\{"simpleText":"([\d,.]+)"/',
-    '/"countText":\{"simpleText":"([\d,.]+)"/'
-]);
 
-$comments = $comments ? intval(str_replace([",","."], "", $comments)) : 0;
+// =====================================================
+// COMENTÁRIOS (PARTE MAIS IMPORTANTE)
+// =====================================================
 
-// ----------------------------------------------
-// TÍTULO
-// ----------------------------------------------
-$title = extract_match($html, [
-    '/"title":"(.*?)"/',
-    '/"title":\{"simpleText":"(.*?)"/'
-]);
+$comments = 0;
 
-// ----------------------------------------------
-// CANAL
-// ----------------------------------------------
-$channel = extract_match($html, [
-    '/"ownerChannelName":"(.*?)"/',
-    '/"channel":"(.*?)"/'
-]);
+// 1) Procurar na aba de comentários do ytInitialData
+if ($yt) {
 
-// ----------------------------------------------
-// REGISTRO FINAL
-// ----------------------------------------------
+    // Caminho típico:
+    // contents.twoColumnWatchNextResults.results
+    $results = $yt["contents"]["twoColumnWatchNextResults"]["results"]["results"]["contents"] ?? [];
+
+    foreach ($results as $block) {
+        if (isset($block["itemSectionRenderer"]["targetId"]) &&
+            $block["itemSectionRenderer"]["targetId"] === "comments-section") {
+
+            // Tenta extrair
+            $commentHeader = $block["itemSectionRenderer"]["contents"][0]["commentsEntryPointHeaderRenderer"] ?? null;
+
+            if ($commentHeader && isset($commentHeader["commentCount"]["simpleText"])) {
+                $found = $commentHeader["commentCount"]["simpleText"];
+                $comments = intval(str_replace([",","."], "", $found));
+            }
+        }
+    }
+}
+
+
+// 2) Fallback no playerJSON
+if ($comments === 0 && $playerJSON) {
+    $counts = @$playerJSON["engagementPanels"];
+    if ($counts) {
+        foreach ($counts as $block) {
+            if (isset($block["engagementPanelSectionListRenderer"]["panelIdentifier"]) &&
+                $block["engagementPanelSectionListRenderer"]["panelIdentifier"] === "comments-section") {
+
+                $cText = $block["engagementPanelSectionListRenderer"]["header"]["engagementPanelTitleHeaderRenderer"]["commentsCount"]["simpleText"] ?? "";
+                if ($cText) {
+                    $comments = intval(str_replace([",","."], "", $cText));
+                }
+            }
+        }
+    }
+}
+
+
+// 3) Fallback HTML simples
+if ($comments === 0) {
+    preg_match('/"commentCount":"(\d+)"/', $html, $c1);
+    if (isset($c1[1])) $comments = intval($c1[1]);
+}
+
+
+// =====================================================
+// TÍTULO E CANAL
+// =====================================================
+
+$title = $playerJSON["videoDetails"]["title"]
+      ?? ($yt["videoDetails"]["title"] ?? "Sem título");
+
+$channel = $playerJSON["videoDetails"]["author"]
+        ?? ($yt["videoDetails"]["author"] ?? "Desconhecido");
+
+
+// =====================================================
+// MONTAR REGISTRO
+// =====================================================
+
 $new = [
     "data"      => date("Y-m-d H:i:s"),
     "views"     => $views,
     "likes"     => $likes,
     "comments"  => $comments,
-    "title"     => $title ?: "Sem título",
-    "channel"   => $channel ?: "Desconhecido"
+    "title"     => $title,
+    "channel"   => $channel
 ];
 
-// ----------------------------------------------
-// GRAVA NO JSON
-// ----------------------------------------------
+
+// =====================================================
+// GRAVAR NO JSON
+// =====================================================
+
 if (!file_exists($JSON_FILE)) {
     file_put_contents($JSON_FILE, "[]");
 }
@@ -106,6 +162,8 @@ $old = json_decode(file_get_contents($JSON_FILE), true);
 $old[] = $new;
 
 file_put_contents($JSON_FILE, json_encode($old, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
+
+// =====================================================
 
 echo "✅ Coleta registrada em {$new['data']}\n";
 echo "👀 Views: {$new['views']} | 👍 Likes: {$new['likes']} | 💬 Comentários: {$new['comments']}\n";
