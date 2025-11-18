@@ -7,103 +7,107 @@ $API_KEY = "56d51dcab377a0365e0728c36c342e7f";
 $VIDEO_ID = "7b9TyVtVeJo";
 $JSON_FILE = "dados.json";
 
-// Monta URL ScraperAPI → YouTube
-$url = "https://api.scraperapi.com/?api_key={$API_KEY}&url=" . urlencode("https://www.youtube.com/watch?v={$VIDEO_ID}");
+// URL com RENDER, DESKTOP e PAÍS definido
+$target = "https://www.youtube.com/watch?v={$VIDEO_ID}";
+$url = "https://api.scraperapi.com/?" . http_build_query([
+    'api_key'     => $API_KEY,
+    'url'         => $target,
+    'render'      => 'true',
+    'country'     => 'us',
+    'device_type' => 'desktop'
+]);
 
-// Baixa HTML via ScraperAPI
 $html = @file_get_contents($url);
 
 if (!$html) {
-    die("❌ Erro ao acessar via ScraperAPI");
+    die("❌ Erro ao acessar via ScraperAPI no modo renderizado.");
 }
 
-// ========================================================
-// 1) EXTRAI VIEWS (funciona sempre)
-// ========================================================
-preg_match('/"viewCount":"(\d+)"/', $html, $mv);
-$views = isset($mv[1]) ? intval($mv[1]) : 0;
+// ==========================================================
+// 1) EXTRAIR JSON INTERNO ytInitialData e ytInitialPlayerResponse
+// ==========================================================
 
-// ========================================================
-// 2) EXTRAIR LIKES – VÁRIOS FORMATO POSSÍVEIS
-// ========================================================
+preg_match('/ytInitialData"\] = (\{.*?\});/s', $html, $js1);
+preg_match('/ytInitialPlayerResponse"\] = (\{.*?\});/s', $html, $js2);
 
-$likes = null;
+$ytInitialData  = isset($js1[1]) ? json_decode($js1[1], true) : null;
+$ytPlayer       = isset($js2[1]) ? json_decode($js2[1], true) : null;
 
-// Padrão comum
-if (!$likes) {
-    preg_match('/"label":"([\d,.]+) Likes"/', $html, $m1);
-    if (isset($m1[1])) $likes = intval(str_replace([",","."], "", $m1[1]));
+// ==========================================================
+// 2) EXTRAIR VIEWS
+// ==========================================================
+
+$views = 0;
+
+if ($ytPlayer && isset($ytPlayer["videoDetails"]["viewCount"])) {
+    $views = intval($ytPlayer["videoDetails"]["viewCount"]);
+} else {
+    preg_match('/"viewCount":"(\d+)"/', $html, $mviews);
+    if (isset($mviews[1])) $views = intval($mviews[1]);
 }
 
-// Novo formato 2024+
-if (!$likes) {
-    preg_match('/"likeCount":"(\d+)"/', $html, $m2);
-    if (isset($m2[1])) $likes = intval($m2[1]);
+// ==========================================================
+// 3) EXTRAIR LIKES (render mode = sempre aparece!)
+// ==========================================================
+
+$likes = 0;
+
+// modo moderno: engagementPanels
+if ($ytPlayer) {
+    if (isset($ytPlayer["videoDetails"]["likes"])) {
+        $likes = intval($ytPlayer["videoDetails"]["likes"]);
+    }
 }
 
-// Schema.org (JSON-LD)
-if (!$likes) {
-    if (preg_match('/<script type="application\/ld\+json">(.+?)<\/script>/s', $html, $jsonBlock)) {
-        $json = json_decode($jsonBlock[1], true);
-        if (isset($json["interactionStatistic"])) {
-            foreach ($json["interactionStatistic"] as $stat) {
-                if (($stat["interactionType"]["@type"] ?? "") === "LikeAction") {
-                    $likes = intval($stat["userInteractionCount"]);
-                }
+// fallback via HTML
+if ($likes == 0) {
+    preg_match('/"label":"([\d,.]+) Likes"/', $html, $mlike);
+    if (isset($mlike[1])) {
+        $likes = intval(str_replace([",","."], "", $mlike[1]));
+    }
+}
+
+// ==========================================================
+// 4) EXTRAIR COMENTÁRIOS (funciona no render=true)
+// ==========================================================
+
+$comments = 0;
+
+// caminho mais comum no render=true
+if ($ytInitialData) {
+    $contents = $ytInitialData["contents"]["twoColumnWatchNextResults"]["results"]["results"]["contents"] ?? [];
+
+    foreach ($contents as $block) {
+        if (isset($block["itemSectionRenderer"]["targetId"]) &&
+            $block["itemSectionRenderer"]["targetId"] === "comments-section") {
+
+            // este campo sempre aparece no modo render=true
+            $count = $block["itemSectionRenderer"]["header"]["commentsEntryPointHeaderRenderer"]["commentCount"]["simpleText"]
+                     ?? null;
+
+            if ($count) {
+                $comments = intval(str_replace([",","."], "", $count));
             }
         }
     }
 }
 
-if (!$likes) $likes = 0;
-
-// ========================================================
-// 3) EXTRAIR COMENTÁRIOS – VÁRIOS FORMATO POSSÍVEIS
-// ========================================================
-$comments = null;
-
-// Padrão antigo
-if (!$comments) {
-    preg_match('/"commentCount":"(\d+)"/', $html, $c1);
-    if (isset($c1[1])) $comments = intval($c1[1]);
+// fallback simples
+if ($comments == 0) {
+    preg_match('/"commentCount":"(\d+)"/', $html, $mcom);
+    if (isset($mcom[1])) $comments = intval($mcom[1]);
 }
 
-// Schema.org → CommentAction
-if (!$comments) {
-    if (preg_match('/<script type="application\/ld\+json">(.+?)<\/script>/s', $html, $jsonBlock)) {
-        $json = json_decode($jsonBlock[1], true);
-        if (isset($json["interactionStatistic"])) {
-            foreach ($json["interactionStatistic"] as $stat) {
-                if (($stat["interactionType"]["@type"] ?? "") === "CommentAction") {
-                    $comments = intval($stat["userInteractionCount"]);
-                }
-            }
-        }
-    }
-}
+// ==========================================================
+// 5) TÍTULO E CANAL
+// ==========================================================
 
-// Microdata
-if (!$comments) {
-    preg_match('/"commentCount":\{"simpleText":"([\d,.]+)"/', $html, $c2);
-    if (isset($c2[1])) $comments = intval(str_replace([",","."], "", $c2[1]));
-}
+$title   = $ytPlayer["videoDetails"]["title"] ?? "Sem título";
+$channel = $ytPlayer["videoDetails"]["author"] ?? "Desconhecido";
 
-// fallback
-if (!$comments) $comments = 0;
-
-// ========================================================
-// TÍTULO E CANAL
-// ========================================================
-
-preg_match('/"title":"(.*?)"/', $html, $mt);
-$title = $mt[1] ?? "Sem título";
-
-preg_match('/"ownerChannelName":"(.*?)"/', $html, $mc);
-$channel = $mc[1] ?? "Desconhecido";
-
-// ========================================================
-// SALVAR NO JSON
-// ========================================================
+// ==========================================================
+// 6) SALVAR
+// ==========================================================
 
 $new = [
     "data"      => date("Y-m-d H:i:s"),
@@ -123,9 +127,9 @@ $old[] = $new;
 
 file_put_contents($JSON_FILE, json_encode($old, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
 
-echo "=====================================\n";
-echo "  Scraping via ScraperAPI (YouTube)  \n";
-echo "=====================================\n";
+echo "==========================================\n";
+echo " ScraperAPI (Render Mode) - Coleta Completa\n";
+echo "==========================================\n";
 echo "📅 Data: {$new['data']}\n";
 echo "👀 Views: {$new['views']}\n";
 echo "👍 Likes: {$new['likes']}\n";
