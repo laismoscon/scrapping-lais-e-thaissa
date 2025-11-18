@@ -8,7 +8,7 @@ $VIDEO_ID = "7b9TyVtVeJo";
 $JSON_FILE = "dados.json";
 
 $target = "https://www.youtube.com/watch?v={$VIDEO_ID}";
-$url = "https://api.scraperapi.com/?api_key={$API_KEY}&url=" . urlencode($target);
+$url = "https://api.scraperapi.com/?api_key={$API_KEY}&render=true&autoparse=true&url=" . urlencode($target);
 
 $html = @file_get_contents($url);
 
