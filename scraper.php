@@ -7,138 +7,103 @@ $API_KEY = "56d51dcab377a0365e0728c36c342e7f";
 $VIDEO_ID = "7b9TyVtVeJo";
 $JSON_FILE = "dados.json";
 
-$target = "https://www.youtube.com/watch?v={$VIDEO_ID}";
-$url = "https://api.scraperapi.com/?api_key={$API_KEY}&url=" . urlencode($target);
+// Monta URL ScraperAPI → YouTube
+$url = "https://api.scraperapi.com/?api_key={$API_KEY}&url=" . urlencode("https://www.youtube.com/watch?v={$VIDEO_ID}");
 
+// Baixa HTML via ScraperAPI
 $html = @file_get_contents($url);
 
 if (!$html) {
     die("❌ Erro ao acessar via ScraperAPI");
 }
 
-// =====================================================
-// 1. EXTRAIR TODOS OS JSONS INTERNOS DO YOUTUBE
-// =====================================================
+// ========================================================
+// 1) EXTRAI VIEWS (funciona sempre)
+// ========================================================
+preg_match('/"viewCount":"(\d+)"/', $html, $mv);
+$views = isset($mv[1]) ? intval($mv[1]) : 0;
 
-// Pega o JSON mais importante: ytInitialData
-preg_match('/ytInitialData"\]\s*=\s*(\{.*?\});/', $html, $init1);
+// ========================================================
+// 2) EXTRAIR LIKES – VÁRIOS FORMATO POSSÍVEIS
+// ========================================================
 
-// Pega o JSON do player: ytInitialPlayerResponse
-preg_match('/ytInitialPlayerResponse"\]\s*=\s*(\{.*?\});/', $html, $init2);
+$likes = null;
 
-// Fallback adicional
-preg_match('/var ytInitialData = (\{.*?\});/', $html, $init3);
-
-$json_raw = $init1[1] ?? $init2[1] ?? $init3[1] ?? null;
-$yt = $json_raw ? json_decode($json_raw, true) : null;
-
-
-// =====================================================
-// 2. EXTRAIR DADOS DO ytInitialPlayerResponse SE EXISTIR
-// =====================================================
-
-preg_match('/ytInitialPlayerResponse"\]\s*=\s*(\{.*?\});/', $html, $playerMatch);
-$playerJSON = isset($playerMatch[1]) ? json_decode($playerMatch[1], true) : null;
-
-
-// =====================================================
-// VIEWS
-// =====================================================
-
-$views = 0;
-
-if ($playerJSON && isset($playerJSON["videoDetails"]["viewCount"])) {
-    $views = intval($playerJSON["videoDetails"]["viewCount"]);
-} else {
-    // fallback HTML
-    preg_match('/"viewCount":"(\d+)"/', $html, $m);
-    if (isset($m[1])) $views = intval($m[1]);
+// Padrão comum
+if (!$likes) {
+    preg_match('/"label":"([\d,.]+) Likes"/', $html, $m1);
+    if (isset($m1[1])) $likes = intval(str_replace([",","."], "", $m1[1]));
 }
 
-
-// =====================================================
-// LIKES
-// =====================================================
-
-$likes = 0;
-
-if ($playerJSON && isset($playerJSON["videoDetails"]["likes"])) {
-    $likes = intval($playerJSON["videoDetails"]["likes"]);
-} else {
-    // fallback
-    preg_match('/"label":"([\d,.]+) Likes"/', $html, $ml);
-    if (isset($ml[1])) $likes = intval(str_replace([",","."], "", $ml[1]));
+// Novo formato 2024+
+if (!$likes) {
+    preg_match('/"likeCount":"(\d+)"/', $html, $m2);
+    if (isset($m2[1])) $likes = intval($m2[1]);
 }
 
-
-// =====================================================
-// COMENTÁRIOS (PARTE MAIS IMPORTANTE)
-// =====================================================
-
-$comments = 0;
-
-// 1) Procurar na aba de comentários do ytInitialData
-if ($yt) {
-
-    // Caminho típico:
-    // contents.twoColumnWatchNextResults.results
-    $results = $yt["contents"]["twoColumnWatchNextResults"]["results"]["results"]["contents"] ?? [];
-
-    foreach ($results as $block) {
-        if (isset($block["itemSectionRenderer"]["targetId"]) &&
-            $block["itemSectionRenderer"]["targetId"] === "comments-section") {
-
-            // Tenta extrair
-            $commentHeader = $block["itemSectionRenderer"]["contents"][0]["commentsEntryPointHeaderRenderer"] ?? null;
-
-            if ($commentHeader && isset($commentHeader["commentCount"]["simpleText"])) {
-                $found = $commentHeader["commentCount"]["simpleText"];
-                $comments = intval(str_replace([",","."], "", $found));
-            }
-        }
-    }
-}
-
-
-// 2) Fallback no playerJSON
-if ($comments === 0 && $playerJSON) {
-    $counts = @$playerJSON["engagementPanels"];
-    if ($counts) {
-        foreach ($counts as $block) {
-            if (isset($block["engagementPanelSectionListRenderer"]["panelIdentifier"]) &&
-                $block["engagementPanelSectionListRenderer"]["panelIdentifier"] === "comments-section") {
-
-                $cText = $block["engagementPanelSectionListRenderer"]["header"]["engagementPanelTitleHeaderRenderer"]["commentsCount"]["simpleText"] ?? "";
-                if ($cText) {
-                    $comments = intval(str_replace([",","."], "", $cText));
+// Schema.org (JSON-LD)
+if (!$likes) {
+    if (preg_match('/<script type="application\/ld\+json">(.+?)<\/script>/s', $html, $jsonBlock)) {
+        $json = json_decode($jsonBlock[1], true);
+        if (isset($json["interactionStatistic"])) {
+            foreach ($json["interactionStatistic"] as $stat) {
+                if (($stat["interactionType"]["@type"] ?? "") === "LikeAction") {
+                    $likes = intval($stat["userInteractionCount"]);
                 }
             }
         }
     }
 }
 
+if (!$likes) $likes = 0;
 
-// 3) Fallback HTML simples
-if ($comments === 0) {
+// ========================================================
+// 3) EXTRAIR COMENTÁRIOS – VÁRIOS FORMATO POSSÍVEIS
+// ========================================================
+$comments = null;
+
+// Padrão antigo
+if (!$comments) {
     preg_match('/"commentCount":"(\d+)"/', $html, $c1);
     if (isset($c1[1])) $comments = intval($c1[1]);
 }
 
+// Schema.org → CommentAction
+if (!$comments) {
+    if (preg_match('/<script type="application\/ld\+json">(.+?)<\/script>/s', $html, $jsonBlock)) {
+        $json = json_decode($jsonBlock[1], true);
+        if (isset($json["interactionStatistic"])) {
+            foreach ($json["interactionStatistic"] as $stat) {
+                if (($stat["interactionType"]["@type"] ?? "") === "CommentAction") {
+                    $comments = intval($stat["userInteractionCount"]);
+                }
+            }
+        }
+    }
+}
 
-// =====================================================
+// Microdata
+if (!$comments) {
+    preg_match('/"commentCount":\{"simpleText":"([\d,.]+)"/', $html, $c2);
+    if (isset($c2[1])) $comments = intval(str_replace([",","."], "", $c2[1]));
+}
+
+// fallback
+if (!$comments) $comments = 0;
+
+// ========================================================
 // TÍTULO E CANAL
-// =====================================================
+// ========================================================
 
-$title = $playerJSON["videoDetails"]["title"]
-      ?? ($yt["videoDetails"]["title"] ?? "Sem título");
+preg_match('/"title":"(.*?)"/', $html, $mt);
+$title = $mt[1] ?? "Sem título";
 
-$channel = $playerJSON["videoDetails"]["author"]
-        ?? ($yt["videoDetails"]["author"] ?? "Desconhecido");
+preg_match('/"ownerChannelName":"(.*?)"/', $html, $mc);
+$channel = $mc[1] ?? "Desconhecido";
 
-
-// =====================================================
-// MONTAR REGISTRO
-// =====================================================
+// ========================================================
+// SALVAR NO JSON
+// ========================================================
 
 $new = [
     "data"      => date("Y-m-d H:i:s"),
@@ -149,11 +114,6 @@ $new = [
     "channel"   => $channel
 ];
 
-
-// =====================================================
-// GRAVAR NO JSON
-// =====================================================
-
 if (!file_exists($JSON_FILE)) {
     file_put_contents($JSON_FILE, "[]");
 }
@@ -163,7 +123,10 @@ $old[] = $new;
 
 file_put_contents($JSON_FILE, json_encode($old, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
 
-// =====================================================
-
-echo "✅ Coleta registrada em {$new['data']}\n";
-echo "👀 Views: {$new['views']} | 👍 Likes: {$new['likes']} | 💬 Comentários: {$new['comments']}\n";
+echo "=====================================\n";
+echo "  Scraping via ScraperAPI (YouTube)  \n";
+echo "=====================================\n";
+echo "📅 Data: {$new['data']}\n";
+echo "👀 Views: {$new['views']}\n";
+echo "👍 Likes: {$new['likes']}\n";
+echo "💬 Comentários: {$new['comments']}\n";
